@@ -14,7 +14,7 @@
 
 </div>
 
-> 一个自包含的 Python 脚本，每天自动帮你领取 **WorkBuddy**（腾讯 AI 编程助手）的每日签到积分。只读取你自己机器上的登录态，零内置密钥，可安全分享。
+> 一个自包含的 Python 脚本，每天自动帮你领取 **WorkBuddy**（腾讯 AI 编程助手）的每日签到积分。支持读取本机登录态，也支持通过 GitHub Actions Secret 在云端定时执行；仓库零内置密钥，可安全分享。
 >
 > 👤 作者：[88lin](https://github.com/88lin) · 📦 仓库：[github.com/88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)
 
@@ -61,39 +61,68 @@
 | ♻️ | **幂等安全** —— 先查状态，未签才领；重复运行不会多领 |
 | 🐱 | **成长中心** —— 自动领旅行礼物、派 Buddy、领取新任务、领任务奖、断登自动补登、连登奖励兑换、开盲盒抽奖、能量开 Buddy 盲盒 |
 | 🐾 | **成长中心轮询** —— 定时方案自带（Win 一键安装 / macOS 模板）：Buddy 一回来就领礼物并补派，把每日名额用满，不让礼物压到第二天 |
-| ⏰ | **双定时模式** —— AI 自动化（跨平台）或系统级静默（Win / macOS，零 token） |
+| ⏰ | **三种定时模式** —— AI 自动化、系统级静默（Win / macOS）或 GitHub Actions |
 | 📣 | **智能汇报** —— 一行 JSON，如 `成功领取 100 积分（连续 7 天，累计 700 积分）` |
 | 💪 | **健壮** —— 兼容「已签」两种返回形态、识别 401/403 登录态过期、识别非签到季 |
 | 🌍 | **跨平台** —— 自动探测 Windows / macOS / Linux 凭据文件 |
-| 🔐 | **无密钥** —— 仓库不含任何密钥，只读取运行者本机登录凭据 |
+| 🔐 | **无内置密钥** —— 仓库不含任何凭据；本地读取登录文件，GitHub Actions 读取加密 Secret |
 
 ---
 
 ## 📋 前置条件
 
-- ✅ 已安装并**登录过 WorkBuddy 桌面端**（登录后自动写出凭据文件，脚本靠它鉴权）；**Linux 没有**桌面端，登录过 [CodeBuddy CLI](https://www.codebuddy.cn) 即可，脚本会自动探测它的凭据
-- ✅ 本机有 **Python 3**（任意版本，无需任何第三方包）
+- ✅ 已安装并**登录过 WorkBuddy 桌面端**（登录后自动写出凭据文件，脚本靠它鉴权）；**Linux 没有**桌面端，登录过 [CodeBuddy CLI](https://www.codebuddy.cn) 即可。GitHub Actions 模式需要把这份凭据文件保存为仓库 Secret
+- ✅ 本地模式需要 **Python 3**（任意版本，无需任何第三方包）；GitHub Actions 模式由工作流自动准备
 - ⬜ 可选：装了 `git` 就能直接 `clone`；没有的话去仓库页面 **Code → Download ZIP** 解压，效果一样
 
 ---
 
 ## ⏰ 每日定时自动化
 
-本脚本依赖本机桌面端的登录态，因此定时必须跑在本机。提供**两种定时模式**，按需选择：
+本脚本默认读取本机桌面端登录态，也可以通过加密的 GitHub Actions Secret 注入同一份凭据。提供**三种定时模式**，按需选择：
 
 ### 模式对比
 
-| 对比项 | 模式 A：AI 自动化 | 模式 B：系统级静默 ⭐ |
-|:---:|---|---|
-| **平台** | 🌐 Win / macOS / Linux | 🪟 Win / 🍎 macOS |
-| **原理** | WorkBuddy 自动化触发 → AI 模型跑脚本 → 模型汇报 | 系统定时器（Win 任务计划程序 / macOS launchd）直接跑脚本 → 写日志文件 |
-| **Token 消耗** | 每次消耗一次模型调用 | **零** |
-| **聊天记录** | 每次一条 | **零** |
-| **弹窗** | 无 | 无 |
-| **可靠性** | 依赖模型可用性 | 纯系统级，更可靠 |
-| **日志** | 在聊天记录里 | 独立日志文件（Win `signin.log` / macOS `/tmp/*.out`） |
-| **关机错过** | 错过就错过 | 可设「错过后下次启动时补跑」 |
-| **设置难度** | 中（clone + 填绝对路径 + 建自动化） | Win 低（一条命令，全自动）／ macOS 中（改模板里的绝对路径） |
+| 对比项 | 模式 A：AI 自动化 | 模式 B：系统级静默 ⭐ | 模式 C：GitHub Actions |
+|:---:|---|---|---|
+| **平台** | 🌐 Win / macOS / Linux | 🪟 Win / 🍎 macOS | ☁️ GitHub 托管 Runner |
+| **原理** | WorkBuddy 自动化触发 → AI 模型跑脚本 → 模型汇报 | 系统定时器直接跑脚本 → 写日志文件 | GitHub 定时触发 → 从 Secret 临时还原凭据 → 跑脚本 |
+| **Token 消耗** | 每次消耗一次模型调用 | **零** | **零** |
+| **聊天记录** | 每次一条 | **零** | **零** |
+| **弹窗** | 无 | 无 | 无 |
+| **可靠性** | 依赖模型可用性 | 依赖本机开机和网络 | 不依赖本机开机，定时可能有数分钟延迟 |
+| **日志** | 在聊天记录里 | 独立日志文件（Win `signin.log` / macOS `/tmp/*.out`） | 仓库 Actions 运行日志 |
+| **关机错过** | 错过就错过 | 可设「错过后下次启动时补跑」 | 不受本机关机影响 |
+| **设置难度** | 中 | Win 低／macOS 中 | 低（配置一个 Secret） |
+
+### 模式 C：GitHub Actions
+
+适合不想依赖本机开机的人。仓库已提供 [`.github/workflows/workbuddy-signin.yml`](.github/workflows/workbuddy-signin.yml)，默认每天北京时间 **00:17** 执行 `auto`；选择非整点是为了避开 GitHub 定时任务高峰。也可以在 Actions 页面手动运行并选择 `auto`、`status` 或 `growth`。
+
+> [!IMPORTANT]
+> 凭据文件等同于当前 WorkBuddy 登录权限。建议使用**私有仓库**，不要把文件内容提交到 Git、Issue 或运行日志；只应保存到 GitHub Actions 的加密 Secret。
+
+**第 1 步 · 创建仓库 Secret**
+
+打开仓库的 **Settings → Secrets and variables → Actions → New repository secret**：
+
+- Name：`WORKBUDDY_AUTH_JSON`
+- Secret：本机 `workbuddy-desktop.info` 的**完整 JSON 内容**；Linux CodeBuddy CLI 用户则填写 `Tencent-Cloud.coding-copilot.info` 的完整内容
+
+已安装并登录 GitHub CLI 时，也可以直接从文件写入，不让内容经过终端输出：
+
+```bash
+gh secret set WORKBUDDY_AUTH_JSON < "/凭据文件的绝对路径/workbuddy-desktop.info"
+```
+
+**第 2 步 · 手动验证一次**
+
+进入仓库 **Actions → WorkBuddy Auto Sign-in → Run workflow**，先以默认的 `auto` 运行。日志最后出现 `今日已签过` 或 `成功领取 N 积分` 即表示配置成功。之后工作流会按 UTC `17 16 * * *`（北京时间次日 00:17）自动执行。
+
+工作流只给 `contents: read` 权限；凭据会写入 Runner 临时目录并设为 `0600`，任务成功或失败后都会删除。GitHub 托管 Runner 本身也是一次性的。
+
+> [!NOTE]
+> GitHub 上保存的是凭据快照，不会跟随你电脑上的 WorkBuddy 自动刷新。运行结果出现 `NO_SESSION` 或 HTTP `401/403` 时，请在桌面端重新登录，然后用最新凭据文件覆盖 `WORKBUDDY_AUTH_JSON`。Fork 后还需要先在仓库 Actions 页面启用工作流；公开仓库长期无活动时，GitHub 也可能自动暂停定时任务。
 
 ### 模式 A：AI 自动化（跨平台）
 
@@ -322,7 +351,7 @@ python signin.py all            # 查签到状态 + 领取（调试）
 |---|---|
 | `NO_AUTH / 未找到登录凭据` | 先登录一次 WorkBuddy 桌面端（Linux 则是 CodeBuddy CLI）；或设置 `WORKBUDDY_AUTH_FILE` |
 | `NO_AUTH / WORKBUDDY_AUTH_FILE 指向的文件不存在` | 环境变量路径写错了——核对 `looked_in` 字段里的实际路径 |
-| `NO_SESSION / HTTP 401\|403` | 登录态过期——重新登录桌面端，自动化自动恢复 |
+| `NO_SESSION / HTTP 401\|403` | 登录态过期——重新登录桌面端；本地自动化会直接读取新凭据，GitHub Actions 还需覆盖 `WORKBUDDY_AUTH_JSON` |
 | `INACTIVE / 签到活动未开启` | 非签到季，属正常，无需处理 |
 | `NETWORK / 网络不可达` | 断网或服务端不可用，**非**登录问题。脚本内置退避重试（5/15/30/60/90 秒，受时间预算约束），跨得过"刚开机网络还没就绪"那几十秒；仍失败就等下一次运行 |
 | `TIMEOUT / 已达本次运行时间预算` | 网络严重超时导致预算耗尽，已领到的部分照常记录，剩余项下次再领 |
@@ -335,15 +364,15 @@ python signin.py all            # 查签到状态 + 领取（调试）
 | 调试原始返回 | `python signin.py status` 或 `python signin.py all` |
 
 > [!IMPORTANT]
-> 登录态失效时脚本会明确返回 `NO_SESSION` 并提醒重新登录桌面端；重新登录后自动化无需任何改动即自动恢复。
+> 登录态失效时脚本会明确返回 `NO_SESSION` 并提醒重新登录桌面端。本地自动化重新登录后无需改动；GitHub Actions 使用的是凭据快照，须同步更新仓库 Secret。
 
 ---
 
 ## 🔐 安全与隐私
 
-- 脚本只读取**你自己本机**的 WorkBuddy 会话文件，不含、不内嵌、不传输任何第三方密钥
+- 脚本只使用**你自己的** WorkBuddy 会话：本地模式读取本机会话文件，GitHub Actions 模式读取你配置的仓库 Secret
 - 永远不会打印 `accessToken`，`Authorization` 头不会出现在日志里
-- 可安全 fork、分享、在自己机器上运行——它只作用于**你自己的**登录态
+- fork 和分享仓库不会带上 GitHub Secret；无论本地还是 Actions 模式，脚本都只作用于**你自己的**登录态
 
 ---
 

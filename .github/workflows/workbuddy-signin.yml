@@ -1,0 +1,92 @@
+name: WorkBuddy Auto Sign-in
+
+on:
+  schedule:
+    # GitHub cron 使用 UTC；16:17 UTC = 北京时间次日 00:17。
+    # 避开整点高峰，降低定时任务延迟或被丢弃的概率。
+    - cron: "17 16 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 执行模式
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - status
+          - growth
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workbuddy-auto-signin
+  cancel-in-progress: false
+
+jobs:
+  signin:
+    name: Sign in
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WORKBUDDY_BUDGET_SECONDS: "420"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Prepare WorkBuddy credentials
+        env:
+          WORKBUDDY_AUTH_JSON: ${{ secrets.WORKBUDDY_AUTH_JSON }}
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("WORKBUDDY_AUTH_JSON", "").strip()
+          if not raw:
+              raise SystemExit(
+                  "缺少仓库 Secret：WORKBUDDY_AUTH_JSON。请把 WorkBuddy 凭据文件的完整内容保存为该 Secret。"
+              )
+
+          try:
+              session = json.loads(raw)
+          except json.JSONDecodeError:
+              raise SystemExit("WORKBUDDY_AUTH_JSON 不是合法 JSON，请重新保存完整的凭据文件内容。")
+
+          if not isinstance(session, dict):
+              raise SystemExit("WORKBUDDY_AUTH_JSON 的顶层必须是 JSON 对象。")
+
+          token = (session.get("auth") or {}).get("accessToken")
+          uid = (session.get("account") or {}).get("uid")
+          if not token or not uid:
+              raise SystemExit("WORKBUDDY_AUTH_JSON 缺少 auth.accessToken 或 account.uid。")
+
+          # Secret 的整体会被 GitHub 脱敏；额外屏蔽 token，防止异常栈只输出其中一部分。
+          print("::add-mask::%s" % token)
+          auth_file = Path(os.environ["WORKBUDDY_AUTH_FILE"])
+          auth_file.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
+          auth_file.chmod(0o600)
+          PY
+
+      - name: Run WorkBuddy sign-in
+        env:
+          ACTION: ${{ github.event.inputs.action || 'auto' }}
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+        run: python signin.py "$ACTION"
+
+      - name: Remove credentials
+        if: ${{ always() }}
+        env:
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+        run: rm -f -- "$WORKBUDDY_AUTH_FILE"

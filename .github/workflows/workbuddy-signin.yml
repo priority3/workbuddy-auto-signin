@@ -26,9 +26,27 @@ concurrency:
 
 jobs:
   signin:
-    name: Sign in
+    name: ${{ matrix.label }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      # 一个账号失败不影响其他账号继续跑。
+      fail-fast: false
+      # 串行执行，避免同一时刻对同一接口发起并发请求。
+      max-parallel: 1
+      matrix:
+        include:
+          # 每个账号对应一个仓库 Secret。槽位没有配置 Secret 时会自动跳过，
+          # 不会让工作流失败；新增账号只需建好 Secret，不必改这里。
+          - label: "账号 1 (WORKBUDDY_AUTH_JSON)"
+            secret_name: WORKBUDDY_AUTH_JSON
+          - label: "账号 2 (WORKBUDDY_AUTH_JSON_2)"
+            secret_name: WORKBUDDY_AUTH_JSON_2
+          - label: "账号 3 (WORKBUDDY_AUTH_JSON_3)"
+            secret_name: WORKBUDDY_AUTH_JSON_3
+          - label: "账号 4 (WORKBUDDY_AUTH_JSON_4)"
+            secret_name: WORKBUDDY_AUTH_JSON_4
+
     env:
       WORKBUDDY_BUDGET_SECONDS: "420"
 
@@ -44,9 +62,11 @@ jobs:
           python-version: "3.x"
 
       - name: Prepare WorkBuddy credentials
+        id: prep
         env:
-          WORKBUDDY_AUTH_JSON: ${{ secrets.WORKBUDDY_AUTH_JSON }}
-          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+          WORKBUDDY_AUTH_JSON: ${{ secrets[matrix.secret_name] }}
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/wb-auth-${{ matrix.secret_name }}.json
+          MATRIX_SECRET: ${{ matrix.secret_name }}
         run: |
           python - <<'PY'
           import json
@@ -54,10 +74,14 @@ jobs:
           from pathlib import Path
 
           raw = os.environ.get("WORKBUDDY_AUTH_JSON", "").strip()
+          out = Path(os.environ["GITHUB_OUTPUT"])
+
           if not raw:
-              raise SystemExit(
-                  "缺少仓库 Secret：WORKBUDDY_AUTH_JSON。请把 WorkBuddy 凭据文件的完整内容保存为该 Secret。"
-              )
+              # 该槽位未配置 Secret —— 跳过，不算失败。
+              with out.open("a", encoding="utf-8") as fh:
+                  fh.write("available=false\n")
+              print("跳过：未配置 Secret %s" % os.environ.get("MATRIX_SECRET", ""))
+              raise SystemExit(0)
 
           try:
               session = json.loads(raw)
@@ -69,24 +93,34 @@ jobs:
 
           token = (session.get("auth") or {}).get("accessToken")
           uid = (session.get("account") or {}).get("uid")
-          if not token or not uid:
-              raise SystemExit("WORKBUDDY_AUTH_JSON 缺少 auth.accessToken 或 account.uid。")
+          if not isinstance(token, str) or not token:
+              raise SystemExit(
+                  "WORKBUDDY_AUTH_JSON 里的 auth.accessToken 不是明文字符串。"
+                  "新版桌面端写出的凭据文件是加密信封（$wbEncrypted），"
+                  "请改用明文凭据（例如仍在用明文格式的桌面端，或未启用字段加密的客户端）。"
+              )
+          if not uid:
+              raise SystemExit("WORKBUDDY_AUTH_JSON 缺少 account.uid。")
 
           # Secret 的整体会被 GitHub 脱敏；额外屏蔽 token，防止异常栈只输出其中一部分。
           print("::add-mask::%s" % token)
           auth_file = Path(os.environ["WORKBUDDY_AUTH_FILE"])
           auth_file.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
           auth_file.chmod(0o600)
+
+          with out.open("a", encoding="utf-8") as fh:
+              fh.write("available=true\n")
           PY
 
       - name: Run WorkBuddy sign-in
+        if: ${{ steps.prep.outputs.available == 'true' }}
         env:
           ACTION: ${{ github.event.inputs.action || 'auto' }}
-          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/wb-auth-${{ matrix.secret_name }}.json
         run: python signin.py "$ACTION"
 
       - name: Remove credentials
         if: ${{ always() }}
         env:
-          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/workbuddy-auth.json
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/wb-auth-${{ matrix.secret_name }}.json
         run: rm -f -- "$WORKBUDDY_AUTH_FILE"

@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   signin:
-    name: ${{ matrix.label }}
+    name: ${{ matrix.label }}${{ matrix.uid && format('（uid {0}）', matrix.uid) || '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -38,14 +38,22 @@ jobs:
         include:
           # 每个账号对应一个仓库 Secret。槽位没有配置 Secret 时会自动跳过，
           # 不会让工作流失败；新增账号只需建好 Secret，不必改这里。
-          - label: "账号 1 (WORKBUDDY_AUTH_JSON)"
+          #
+          # uid 走仓库变量（Settings → Secrets and variables → Actions → Variables），
+          # 不写死在文件里 —— 这是公开仓库，避免把账号标识随代码公开。
+          # 建好变量后任务名会显示成 "账号 2（uid xxxx）"，便于在 Actions 列表里辨认。
+          - label: "账号 1"
             secret_name: WORKBUDDY_AUTH_JSON
-          - label: "账号 2 (WORKBUDDY_AUTH_JSON_2)"
+            uid: ${{ vars.WB_ACCOUNT_UID }}
+          - label: "账号 2"
             secret_name: WORKBUDDY_AUTH_JSON_2
-          - label: "账号 3 (WORKBUDDY_AUTH_JSON_3)"
+            uid: ${{ vars.WB_ACCOUNT_UID_2 }}
+          - label: "账号 3"
             secret_name: WORKBUDDY_AUTH_JSON_3
-          - label: "账号 4 (WORKBUDDY_AUTH_JSON_4)"
+            uid: ${{ vars.WB_ACCOUNT_UID_3 }}
+          - label: "账号 4"
             secret_name: WORKBUDDY_AUTH_JSON_4
+            uid: ${{ vars.WB_ACCOUNT_UID_4 }}
 
     env:
       WORKBUDDY_BUDGET_SECONDS: "420"
@@ -110,6 +118,35 @@ jobs:
 
           with out.open("a", encoding="utf-8") as fh:
               fh.write("available=true\n")
+          PY
+
+      - name: Identify account
+        if: ${{ steps.prep.outputs.available == 'true' }}
+        env:
+          WORKBUDDY_AUTH_FILE: ${{ runner.temp }}/wb-auth-${{ matrix.secret_name }}.json
+          SLOT_LABEL: ${{ matrix.label }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          session = json.loads(Path(os.environ["WORKBUDDY_AUTH_FILE"]).read_text(encoding="utf-8"))
+          account = session.get("account") or {}
+          auth = session.get("auth") or {}
+          uid = account.get("uid") or "未知"
+          domain = auth.get("domain") or "未知"
+
+          # 只输出 uid 与域名：昵称/uin 属于个人信息，不写进运行摘要。
+          line = "- **%s** — uid `%s` · domain `%s`" % (os.environ.get("SLOT_LABEL", ""), uid, domain)
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as fh:
+              fh.write(line + "\n")
+
+          if os.environ.get("SLOT_LABEL"):
+              line_label = os.environ["SLOT_LABEL"]
+          else:
+              line_label = os.environ.get("MATRIX_SECRET", "")
+          print("本次运行的账号：%s | uid=%s | domain=%s" % (line_label, uid, domain))
           PY
 
       - name: Run WorkBuddy sign-in

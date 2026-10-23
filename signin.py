@@ -582,9 +582,28 @@ def run_growth(headers, endpoint):
     hard_failures = 0   # 其中"需要关注"的那些，只有它们影响退出码
     successes = 0
 
-    def _check_auth(code):
-        """返回 True 表示需要立即退出（登录态失效）。"""
-        return code in (401, 403)
+    # 服务端把「没有 Buddy」「活动未开始」这类业务规则也装在 HTTP 403 里返回，
+    # 正文形如 {"code":403,"msg":"no active buddy"}。若一律按登录失效处理，
+    # 新账号（还没分配到 Buddy）会天天误报 NO_SESSION 并让整个成长中心判失败。
+    AUTH_MSG_HINTS = ("unauthorized", "invalid token", "token expired", "token_invalid",
+                      "not logged in", "login expired", "no session", "session expired",
+                      "invalid_session", "认证失败", "登录已失效", "令牌失效", "未登录")
+
+    def _check_auth(code, body=None):
+        """返回 True 表示需要立即退出（登录态失效）。
+
+        401 无条件按登录失效；403 需要再看正文——只有正文明确指向令牌/会话失效时才算，
+        否则视为业务规则拦下，交给各分支按普通失败处理。
+        """
+        if code not in (401, 403):
+            return False
+        if code == 401:
+            return True
+        if not isinstance(body, dict):
+            # 拿不到正文（网关层返回 HTML 等）时保守处理，仍按登录失效
+            return True
+        msg = str(body.get("msg") or body.get("error") or body.get("message") or "").lower()
+        return any(h in msg for h in AUTH_MSG_HINTS)
 
     def _note_http(code, body, label):
         """前置查询接口非 2xx 时的统一记录；返回 True 表示调用方应跳过后续处理。
@@ -622,7 +641,7 @@ def run_growth(headers, endpoint):
             # 网络不可达就立刻收手，别把后续 5 个接口的重试+等待全跑一遍
             return 1, {"result": "NETWORK",
                        "report": "网络不可达，成长中心跳过（%s）" % (sbody.get("error") or "")}
-        if _check_auth(scode):
+        if _check_auth(scode, sbody):
             return 1, {"result": "NO_SESSION",
                        "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
         travel = dig(sbody, "state") if (200 <= scode < 300) else None
@@ -634,7 +653,7 @@ def run_growth(headers, endpoint):
         if travel == "arrived":
             record_id = dig(sbody, "record_id")
             ccode, cbody = post(base + "/buddy/travel/claim", headers, {"record_id": record_id})
-            if _check_auth(ccode):
+            if _check_auth(ccode, cbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             if 200 <= ccode < 300 and dig(cbody, "reward_credit") is not None:
@@ -656,7 +675,7 @@ def run_growth(headers, endpoint):
             parts.append("今日旅行名额已用完")
         elif travel == "idle":
             ccode, cbody = get(base + "/buddy/travel/config", headers)
-            if _check_auth(ccode):
+            if _check_auth(ccode, cbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             locs = dig(cbody, "locations") if (200 <= ccode < 300) else None
@@ -664,7 +683,7 @@ def run_growth(headers, endpoint):
                 loc = locs[0]
                 dcode, dbody = post(base + "/buddy/travel/depart", headers,
                                     {"location_id": loc.get("id")})
-                if _check_auth(dcode):
+                if _check_auth(dcode, dbody):
                     return 1, {"result": "NO_SESSION",
                                "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                 if 200 <= dcode < 300:
@@ -693,7 +712,7 @@ def run_growth(headers, endpoint):
     else:
         try:
             tcode, tbody = get(base + "/tasks", headers)
-            if _check_auth(tcode):
+            if _check_auth(tcode, tbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             if not _note_http(tcode, tbody, "查任务列表"):
@@ -715,7 +734,7 @@ def run_growth(headers, endpoint):
                     batch = pending[i:i + 20]
                     acode, abody = post(base + "/tasks/accept", headers,
                                         {"task_codes": batch})
-                    if _check_auth(acode):
+                    if _check_auth(acode, abody):
                         return 1, {"result": "NO_SESSION",
                                    "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                     # 逐条读 results：接单失败必须报出来（常见
@@ -746,7 +765,7 @@ def run_growth(headers, endpoint):
                     title = titles.get(code, code)
                     try:
                         ccode, cbody = post(base + "/tasks/%s/claim" % code, headers, {})
-                        if _check_auth(ccode):
+                        if _check_auth(ccode, cbody):
                             return 1, {"result": "NO_SESSION",
                                        "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                         if 200 <= ccode < 300 and not dig(cbody, "already_claimed"):
@@ -787,7 +806,7 @@ def run_growth(headers, endpoint):
     else:
         try:
             mcode, mbody = get(base + "/streak", headers)
-            if _check_auth(mcode):
+            if _check_auth(mcode, mbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             if not _note_http(mcode, mbody, "查连登状态"):
@@ -809,7 +828,7 @@ def run_growth(headers, endpoint):
                             break
                         ucode, ubody = post(base + "/makeup-cards/use", headers,
                                             {"target_date": d, "client_token": _client_token()})
-                        if _check_auth(ucode):
+                        if _check_auth(ucode, ubody):
                             return 1, {"result": "NO_SESSION",
                                        "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                         if 200 <= ucode < 300:
@@ -843,7 +862,7 @@ def run_growth(headers, endpoint):
     else:
         try:
             rcode, rbody = get(base + "/redeem/summary", headers)
-            if _check_auth(rcode):
+            if _check_auth(rcode, rbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             if not _note_http(rcode, rbody, "查连登兑换"):
@@ -876,7 +895,7 @@ def run_growth(headers, endpoint):
                     if _is_tier_locked(c2code, c2body):
                         parts.append("连登兑换「%s」未解锁（连登天数不足）" % label)
                         continue
-                    if _check_auth(c2code):
+                    if _check_auth(c2code, c2body):
                         return 1, {"result": "NO_SESSION",
                                    "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                     if 200 <= c2code < 300:
@@ -899,14 +918,14 @@ def run_growth(headers, endpoint):
     else:
         try:
             lcode, lbody = get(base + "/lottery/chances", headers)
-            if _check_auth(lcode):
+            if _check_auth(lcode, lbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             chances = 0 if _note_http(lcode, lbody, "查抽奖机会") else as_int(dig(lbody, "balance"))
             if chances > 0:
                 dcode, dbody = post(base + "/lottery/draw", headers,
                                     {"client_token": _client_token()})
-                if _check_auth(dcode):
+                if _check_auth(dcode, dbody):
                     return 1, {"result": "NO_SESSION",
                                "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                 if 200 <= dcode < 300:
@@ -945,7 +964,7 @@ def run_growth(headers, endpoint):
     else:
         try:
             qcode, qbody = get(base + "/buddy/quota", headers)
-            if _check_auth(qcode):
+            if _check_auth(qcode, qbody):
                 return 1, {"result": "NO_SESSION",
                            "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
             if not _note_http(qcode, qbody, "查 Buddy 能量"):
@@ -955,7 +974,7 @@ def run_growth(headers, endpoint):
                     count = min(affordable, max_open)
                     ocode, obody = post(base + "/buddy/open", headers,
                                         {"count": count, "client_token": _client_token()})
-                    if _check_auth(ocode):
+                    if _check_auth(ocode, obody):
                         return 1, {"result": "NO_SESSION",
                                    "report": "登录态已失效，请重新登录 WorkBuddy 桌面端"}
                     if 200 <= ocode < 300:
@@ -980,7 +999,7 @@ def run_growth(headers, endpoint):
     if _budget_left() > 0:
         try:
             ecode, ebody = get(base + "/energy", headers)
-            if not _check_auth(ecode):
+            if not _check_auth(ecode, ebody):
                 energy = dig(ebody, "balance") if (200 <= ecode < 300) else None
         except Exception:
             pass

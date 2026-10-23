@@ -187,6 +187,111 @@ def load_session_retry(auth_file, attempts=3, delay=2.0):
     raise last
 
 
+# --- accessToken 续期 ---
+# 端点与 WorkBuddy 桌面端完全一致：POST {host}/v2/plugin/auth/token/refresh，
+# refreshToken 走 X-Refresh-Token 头。实测服务端**不吊销**旧的 refreshToken
+# （同一个 token 可以反复换新 accessToken），所以放在定时任务里每次运行都换一枚，
+# 不必再靠人工或本机定时任务去刷新 GitHub Secret。
+REFRESH_HOSTS = ("https://www.codebuddy.cn", "https://www.workbuddy.cn")
+
+
+def refresh_session(session, auth_file=None):
+    """用 refreshToken 换一枚新的 accessToken；换不动就原样继续。
+
+    返回 (session, 说明文字)。续期失败**不**影响后续逻辑——原 accessToken
+    可能仍然有效，交给原来的流程去判定，避免把续期抖动误报成登录失效。
+    """
+    auth = session.get("auth") or {}
+    rt = auth.get("refreshToken") or auth.get("refresh_token")
+    if not rt:
+        return session, "凭据里没有 refreshToken，跳过续期"
+    if (os.environ.get("WORKBUDDY_NO_REFRESH") or "").strip().lower() in ("1", "true", "yes", "on"):
+        return session, "已通过 WORKBUDDY_NO_REFRESH 关闭续期"
+
+    domain = str(auth.get("domain") or "").strip()
+    hosts = []
+    if domain:
+        hosts.append("https://" + domain)
+    hosts.extend(h for h in REFRESH_HOSTS if h not in hosts)
+
+    def _ascii(value):
+        """urllib 的 header 只吃 latin-1；损坏/含非 ASCII 的令牌直接丢弃而不是让整个请求抛错。"""
+        try:
+            str(value).encode("latin-1")
+            return str(value)
+        except (UnicodeEncodeError, TypeError):
+            return ""
+
+    headers = {"Accept": "application/json", "Content-Type": "application/json",
+               "User-Agent": "WorkBuddy"}
+    rt = _ascii(rt)
+    if not rt:
+        return session, "refreshToken 含非法字符，跳过续期"
+    headers["X-Refresh-Token"] = rt
+    at = _ascii(auth.get("accessToken") or auth.get("access_token"))
+    if at:
+        headers["Authorization"] = "Bearer %s" % at
+
+    last = "未知原因"
+    for host in hosts:
+        code, body = post(host + "/v2/plugin/auth/token/refresh", headers, {})
+        if not isinstance(body, dict):
+            last = "HTTP %s（无 JSON 响应）" % code
+            continue
+        if not (200 <= code < 300):
+            last = "HTTP %s %s" % (code, str(body.get("msg") or body.get("message") or "")[:60])
+            continue
+        data = body.get("data") or (body if body.get("accessToken") else None)
+        if not data:
+            last = "响应里没有 data"
+            continue
+        new_at = data.get("accessToken") or data.get("access_token")
+        if not new_at:
+            last = "响应缺少 accessToken"
+            continue
+
+        new_rt = data.get("refreshToken") or data.get("refresh_token")
+        if new_rt:
+            auth["refreshToken"] = new_rt
+        auth["accessToken"] = new_at
+        now = int(time.time() * 1000)
+        for key, short, key_s, short_s in (
+            ("expiresAt", "expiresIn", "expires_at", "expires_in"),
+            ("refreshExpiresAt", "refreshExpiresIn", "refresh_expires_at", "refresh_expires_in"),
+        ):
+            got = data.get(key) or data.get(key_s)
+            if got:
+                auth[key] = int(got) if int(got) > 1e11 else int(got) * 1000
+            else:
+                life = data.get(short) or data.get(short_s)
+                if life:
+                    auth[key] = now + int(life) * 1000
+        auth["lastRefreshTime"] = now
+        for key in ("tokenType", "domain", "scope", "sessionState"):
+            if data.get(key) is not None:
+                auth[key] = data[key]
+        session["auth"] = auth
+
+        if auth_file:
+            try:
+                tmp = auth_file + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(session, fh, ensure_ascii=False)
+                os.replace(tmp, auth_file)
+            except Exception:
+                pass  # 写不回磁盘不影响本次运行，下一轮再续期即可
+
+        until = auth.get("expiresAt")
+        tail = ("，新令牌有效至 %s" % datetime.fromtimestamp(until / 1000).strftime("%Y-%m-%d %H:%M")
+                if until else "")
+        return session, "已续期 accessToken%s" % tail
+    return session, "续期失败（%s），仍用原令牌继续" % last
+
+
+def _snake(name):
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
 def build_headers(session):
     auth = session.get("auth") or {}
     account = session.get("account") or {}
@@ -1249,6 +1354,12 @@ def _run(action):
               "report": "读取登录凭据失败（%s: %s），请重新登录 WorkBuddy 桌面端" % (type(e).__name__, e)},
              action)
         return 2
+
+    # 先拿 refreshToken 换一枚新 accessToken：定时任务里的 Secret 往往已存了几天，
+    # 不续期迟早过期。续期失败也不影响，原令牌还能用就继续。
+    session, refresh_note = refresh_session(session, auth_file)
+    if refresh_note:
+        print("[refresh] %s" % refresh_note)
 
     try:
         headers = build_headers(session)
